@@ -1,5 +1,5 @@
 /**
- *Express Web Server
+ * 🐛 Tech God Bug 2026 v2.5.0.5.7 — Express Web Server
  * Provides: health check, pairing endpoint, QR endpoint, admin panel, dashboard.
  * By Keith Tech
  */
@@ -15,7 +15,13 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // ── Health check (for Render / Railway) ──────────────────────────────────────
+// ── Root: send visitors straight to the pairing page ────────────────────────
+// (Render/Railway health checks should point at /health or /status instead.)
 app.get('/', (req, res) => {
+  res.redirect('/pair');
+});
+
+app.get('/status', (req, res) => {
   const bots = sessionManager.getAllBots();
   const connected = bots.filter(b => b.connected).length;
   res.json({
@@ -205,9 +211,9 @@ app.get('/pair', (req, res) => {
       const phone = document.getElementById('phone').value.trim();
       const btn = document.getElementById('btn-pair');
       const result = document.getElementById('result-code');
-      if (!/^\d{10,15}$/.test(phone)) {
+      if (!/^\\d{9,15}$/.test(phone)) {
         result.className = 'result error show';
-        result.innerHTML = '<div class="result-row"><i class="fa-solid fa-triangle-exclamation"></i> Invalid number. Use 10-15 digits only (no + or spaces).</div>';
+        result.innerHTML = '<div class="result-row"><i class="fa-solid fa-triangle-exclamation"></i> Invalid number. Use 9-15 digits only (no + or spaces).</div>';
         return;
       }
       btn.disabled = true;
@@ -236,9 +242,9 @@ app.get('/pair', (req, res) => {
       const phone = document.getElementById('phone-qr').value.trim();
       const btn = document.getElementById('btn-qr');
       const result = document.getElementById('result-qr');
-      if (!/^\d{10,15}$/.test(phone)) {
+      if (!/^\\d{9,15}$/.test(phone)) {
         result.className = 'result error show';
-        result.innerHTML = '<div class="result-row"><i class="fa-solid fa-triangle-exclamation"></i> Invalid number. Use 10-15 digits only (no + or spaces).</div>';
+        result.innerHTML = '<div class="result-row"><i class="fa-solid fa-triangle-exclamation"></i> Invalid number. Use 9-15 digits only (no + or spaces).</div>';
         return;
       }
       btn.disabled = true;
@@ -274,7 +280,7 @@ app.get('/pair', (req, res) => {
 // ── Pairing code endpoint (POST) ─────────────────────────────────────────────
 app.post('/pair', async (req, res) => {
   const { phone } = req.body;
-  if (!phone || !/^\d{10,15}$/.test(phone)) {
+  if (!phone || !/^\d{9,15}$/.test(phone)) {
     return res.status(400).json({ error: 'Invalid phone number. Use digits only (10-15).' });
   }
 
@@ -292,7 +298,7 @@ app.post('/pair', async (req, res) => {
 // ── QR code endpoint (POST) ──────────────────────────────────────────────────
 app.post('/qr', async (req, res) => {
   const { phone } = req.body;
-  if (!phone || !/^\d{10,15}$/.test(phone)) {
+  if (!phone || !/^\d{9,15}$/.test(phone)) {
     return res.status(400).json({ error: 'Invalid phone number. Use digits only (10-15).' });
   }
 
