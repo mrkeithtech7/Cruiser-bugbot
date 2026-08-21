@@ -135,7 +135,7 @@ const menu = `
   ❯ ${P}rmpremium @user  – Remove premium access
 
 ══════════════════════════════════════
-
+🐛 Tech God Bug 2026 · By Dev‑Ntando
 _Type ${P}menu to see this again_
 `;
 

@@ -33,6 +33,34 @@ const config         = require('./config');
 const sessionManager = require('./sessionManager');
 const server         = require('./server');
 
+// ── Auto-restart safety net ───────────────────────────────────────────────────
+// A single bad promise or a stray throw inside an event handler would
+// otherwise crash the ENTIRE process — killing every paired user's session
+// at once. Catch it, log it, and keep the process (and every other user's
+// bot) running instead.
+process.on('uncaughtException', (err) => {
+  _orig.error('🐛 [uncaughtException]', err?.stack || err?.message || err);
+});
+process.on('unhandledRejection', (reason) => {
+  _orig.error('🐛 [unhandledRejection]', reason?.stack || reason?.message || reason);
+});
+
+// ── Keepalive self-ping ────────────────────────────────────────────────────────
+// Free-tier hosts (Render, Railway free plans, etc.) put the whole process to
+// sleep after a period of no inbound HTTP traffic, which drops every WhatsApp
+// socket with it. If PUBLIC_URL/RENDER_EXTERNAL_URL is set, ping our own
+// /health endpoint periodically so the host sees continuous activity.
+function _startSelfPing() {
+  if (!config.publicUrl) return;
+  if (typeof fetch !== 'function') return; // needs Node 18+ (already required by package.json)
+  setInterval(() => {
+    fetch(config.publicUrl + '/health').catch(() => {
+      // Network hiccup — not fatal, next tick will try again.
+    });
+  }, config.selfPingIntervalMs);
+  _orig.log(`🔁 Self-ping keepalive enabled → ${config.publicUrl}/health every ${Math.round(config.selfPingIntervalMs / 60000)}m`);
+}
+
 _orig.log([
   '',
   '╔════════════════════════════════════════════╗',
@@ -60,6 +88,8 @@ _orig.log([
 
   // Boot all previously-saved user sessions
   await sessionManager.bootSavedSessions();
+
+  _startSelfPing();
 
   _orig.log('✅ Session manager ready — ' + sessionManager.getAllBots().length + ' bot(s) loaded');
 })();

@@ -27,6 +27,8 @@ const handler   = require('./handler');
 const { decodeSession, clearSession } = require('./utils/session');
 const welcomeMod  = require('./commands/group/welcome');
 const autoProtect = require('./utils/autoprotect');
+const mongo             = require('./utils/mongo');
+const mongoSessionStore = require('./utils/mongoSessionStore');
 
 // ── Root directory for all user sessions ─────────────────────────────────────
 const SESSIONS_ROOT = path.resolve(process.env.SESSIONS_ROOT || './sessions');
@@ -39,16 +41,28 @@ const VERSION_TTL_MS  = 6 * 60 * 60 * 1000;
 
 async function _getVersion() {
   if (_cachedVersion && (Date.now() - _versionFetchedAt) < VERSION_TTL_MS) return _cachedVersion;
-  try {
-    const { version } = await fetchLatestBaileysVersion();
-    _cachedVersion    = version;
-    _versionFetchedAt = Date.now();
-    _log('WA version:', version.join('.'));
-  } catch (e) {
-    if (!_cachedVersion) _cachedVersion = [2, 24, 6];
-    _log('fetchLatestBaileysVersion failed, using fallback:', e.message);
+
+  // Retry a few times before giving up — a stale/wrong hardcoded version
+  // number is a common cause of "pairing code issued but phone never links"
+  // because WhatsApp silently rejects the handshake on a mismatched client
+  // version. If every attempt fails, we return null and let Baileys use its
+  // own bundled default version instead of guessing.
+  for (let i = 0; i < 3; i++) {
+    try {
+      const { version, isLatest } = await fetchLatestBaileysVersion();
+      _cachedVersion    = version;
+      _versionFetchedAt = Date.now();
+      _log(`WA version: ${version.join('.')}${isLatest ? '' : ' (not latest)'}`);
+      return _cachedVersion;
+    } catch (e) {
+      _log(`fetchLatestBaileysVersion attempt ${i + 1}/3 failed:`, e.message);
+      if (i < 2) await new Promise((r) => setTimeout(r, 1500));
+    }
   }
-  return _cachedVersion;
+
+  if (_cachedVersion) return _cachedVersion; // reuse last known-good version
+  _log('⚠️  Could not fetch WA version — letting Baileys use its own bundled default.');
+  return null;
 }
 
 // ── In-memory registry ───────────────────────────────────────────────────────
@@ -72,33 +86,46 @@ function maskPhone(phone) {
 async function bootSavedSessions() {
   await _getVersion();
 
-  if (!fs.existsSync(SESSIONS_ROOT)) return;
-  const dirs = fs.readdirSync(SESSIONS_ROOT).filter(d =>
-    fs.statSync(path.join(SESSIONS_ROOT, d)).isDirectory()
-  );
+  // Kick off Mongo connection in the background (non-blocking — if the URI
+  // is unreachable it keeps retrying with backoff instead of hanging boot).
+  mongo.connect().catch(() => {});
 
-  _log(`Found ${dirs.length} saved session(s)`);
+  const localDirs = fs.existsSync(SESSIONS_ROOT)
+    ? fs.readdirSync(SESSIONS_ROOT).filter(d => fs.statSync(path.join(SESSIONS_ROOT, d)).isDirectory())
+    : [];
 
-  for (const phone of dirs) {
+  // Also pull in any phones that have a Mongo backup but no local dir
+  // (e.g. the host wiped disk on redeploy) — bounded so a slow/unreachable
+  // Mongo can never hang the boot sequence.
+  let mongoPhones = [];
+  if (mongo.isEnabled()) {
+    mongoPhones = await Promise.race([
+      mongoSessionStore.listBackedUpPhones(),
+      new Promise((resolve) => setTimeout(() => resolve([]), 8000)),
+    ]);
+  }
+
+  const allPhones = Array.from(new Set([...localDirs, ...mongoPhones]));
+  _log(`Found ${localDirs.length} local session(s), ${mongoPhones.length} Mongo backup(s) — booting ${allPhones.length} total`);
+
+  for (const phone of allPhones) {
     try {
+      await Promise.race([
+        mongoSessionStore.restoreIfMissing(phone, _sessionDir(phone)),
+        new Promise((resolve) => setTimeout(resolve, 8000)),
+      ]);
       await createBot(phone);
     } catch (e) {
       _log(`Failed to boot session ${maskPhone(phone)}:`, e.message);
     }
   }
+
+  _startWatchdog();
 }
 
-// ── Create / connect a bot instance (no pairing, just boot) ──────────────────
-async function createBot(phone) {
-  if (_bots.has(phone) && !_bots.get(phone).destroyed) {
-    const existing = _bots.get(phone);
-    if (existing.connected) return existing;
-  }
-
-  const sessionDir = _sessionDir(phone);
-  if (!fs.existsSync(sessionDir)) fs.mkdirSync(sessionDir, { recursive: true });
-
-  const bot = {
+// ── Fresh in-memory bot record ────────────────────────────────────────────────
+function _newBotRecord(phone, sessionDir) {
+  return {
     phone,
     sessionDir,
     connected: false,
@@ -113,7 +140,21 @@ async function createBot(phone) {
     startedAt: Date.now(),
     attempt: 0,
     destroyed: false,
+    lastDisconnectedAt: null,
   };
+}
+
+// ── Create / connect a bot instance (no pairing, just boot) ──────────────────
+async function createBot(phone) {
+  if (_bots.has(phone) && !_bots.get(phone).destroyed) {
+    const existing = _bots.get(phone);
+    if (existing.connected) return existing;
+  }
+
+  const sessionDir = _sessionDir(phone);
+  if (!fs.existsSync(sessionDir)) fs.mkdirSync(sessionDir, { recursive: true });
+
+  const bot = _newBotRecord(phone, sessionDir);
 
   _bots.set(phone, bot);
   await _connectSocket(bot);
@@ -128,6 +169,7 @@ async function requestPairCode(phone) {
   if (fs.existsSync(sessionDir)) {
     fs.rmSync(sessionDir, { recursive: true, force: true });
   }
+  mongoSessionStore.remove(phone).catch(() => {}); // don't let a stale Mongo backup get restored later
 
   // Destroy existing bot if any
   if (_bots.has(phone)) {
@@ -139,22 +181,7 @@ async function requestPairCode(phone) {
 
   fs.mkdirSync(sessionDir, { recursive: true });
 
-  const bot = {
-    phone,
-    sessionDir,
-    connected: false,
-    socketReady: false,
-    number: phone,
-    socket: null,
-    qr: null,
-    qrResolve: null,
-    pairCodeResolve: null,
-    pairCodeReject: null,
-    pairCodeRequested: false,
-    startedAt: Date.now(),
-    attempt: 0,
-    destroyed: false,
-  };
+  const bot = _newBotRecord(phone, sessionDir);
 
   _bots.set(phone, bot);
 
@@ -176,6 +203,7 @@ async function requestQR(phone) {
   if (fs.existsSync(sessionDir)) {
     fs.rmSync(sessionDir, { recursive: true, force: true });
   }
+  mongoSessionStore.remove(phone).catch(() => {});
 
   // Destroy existing bot if any
   if (_bots.has(phone)) {
@@ -187,22 +215,7 @@ async function requestQR(phone) {
 
   fs.mkdirSync(sessionDir, { recursive: true });
 
-  const bot = {
-    phone,
-    sessionDir,
-    connected: false,
-    socketReady: false,
-    number: phone,
-    socket: null,
-    qr: null,
-    qrResolve: null,
-    pairCodeResolve: null,
-    pairCodeReject: null,
-    pairCodeRequested: false,
-    startedAt: Date.now(),
-    attempt: 0,
-    destroyed: false,
-  };
+  const bot = _newBotRecord(phone, sessionDir);
 
   _bots.set(phone, bot);
 
@@ -228,7 +241,7 @@ async function _connectSocket(bot) {
   const logger = pino({ level: 'silent' });
 
   const sock = makeWASocket({
-    version,
+    ...(version ? { version } : {}), // omit if unknown rather than risk a stale hardcoded value
     auth: state,
     logger,
     printQRInTerminal: false,
@@ -246,76 +259,67 @@ async function _connectSocket(bot) {
   bot.socket = sock;
 
   // ── Credentials update ─────────────────────────────────────────────────────
-  sock.ev.on('creds.update', saveCreds);
+  sock.ev.on('creds.update', async () => {
+    await saveCreds();
+    mongoSessionStore.saveDebounced(bot.phone, bot.sessionDir);
+  });
+
+  // ── Request pairing code immediately ─────────────────────────────────────
+  // Per Baileys' documented flow, requestPairingCode() must be called right
+  // after the socket is created — NOT after waiting for a 'qr' event. Baileys
+  // queues the request internally until the WS is actually open. Waiting for
+  // 'qr' (the old behavior here) put the request outside the tight timing
+  // window WhatsApp expects, which is why a code would be issued but the
+  // phone's "Link a device" prompt never completed.
+  if (bot.pairCodeResolve && !bot.pairCodeRequested && !state.creds?.registered) {
+    bot.pairCodeRequested = true;
+    (async () => {
+      try {
+        const code = await sock.requestPairingCode(bot.phone);
+        _log(`✅ Pairing code for ${maskPhone(bot.phone)}: ${code}`);
+        if (bot.pairCodeResolve) bot.pairCodeResolve(code);
+      } catch (e) {
+        _log(`❌ Pairing code failed for ${maskPhone(bot.phone)}:`, e.message);
+        if (bot.pairCodeReject) bot.pairCodeReject(e);
+      }
+      bot.pairCodeResolve = null;
+      bot.pairCodeReject = null;
+    })();
+  }
 
   // ── Connection update ──────────────────────────────────────────────────────
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
-    // ── QR generated ─────────────────────────────────────────────────────────
+    // ── QR generated (only meaningful for the QR-scan flow now) ──────────────
     if (qr) {
       bot.qr = qr;
-      _log(`QR generated for ${maskPhone(bot.phone)}`);
-
-      // If someone is waiting for QR, resolve their promise
       if (bot.qrResolve) {
+        _log(`QR generated for ${maskPhone(bot.phone)}`);
         bot.qrResolve(qr);
         bot.qrResolve = null;
-      }
-
-      // If someone is waiting for a pairing code, request it now
-      // This is the correct timing: QR generation means WS is connected to WA
-      if (bot.pairCodeResolve && !bot.pairCodeRequested && !state.creds?.registered) {
-        bot.pairCodeRequested = true;
-        try {
-          const code = await sock.requestPairingCode(bot.phone);
-          _log(`✅ Pairing code for ${maskPhone(bot.phone)}: ${code}`);
-          bot.pairCodeResolve(code);
-        } catch (e) {
-          _log(`❌ Pairing code failed for ${maskPhone(bot.phone)}:`, e.message);
-          if (bot.pairCodeReject) bot.pairCodeReject(e);
-        }
-        bot.pairCodeResolve = null;
-        bot.pairCodeReject = null;
-      }
-    }
-
-    // ── Also try on 'connecting' state ───────────────────────────────────────
-    if (connection === 'connecting') {
-      if (bot.pairCodeResolve && !bot.pairCodeRequested && !state.creds?.registered) {
-        // Wait a moment for WS to fully establish
-        setTimeout(async () => {
-          if (bot.pairCodeRequested || !bot.pairCodeResolve) return;
-          bot.pairCodeRequested = true;
-          try {
-            const code = await sock.requestPairingCode(bot.phone);
-            _log(`✅ Pairing code for ${maskPhone(bot.phone)}: ${code}`);
-            if (bot.pairCodeResolve) bot.pairCodeResolve(code);
-          } catch (e) {
-            _log(`❌ Pairing code failed for ${maskPhone(bot.phone)}:`, e.message);
-            if (bot.pairCodeReject) bot.pairCodeReject(e);
-          }
-          bot.pairCodeResolve = null;
-          bot.pairCodeReject = null;
-        }, 5000);
       }
     }
 
     // ── Connected ────────────────────────────────────────────────────────────
     if (connection === 'open') {
-      bot.connected   = true;
-      bot.socketReady = true;
-      bot.qr          = null;
-      bot.attempt     = 0;
+      bot.connected         = true;
+      bot.socketReady       = true;
+      bot.qr                = null;
+      bot.attempt           = 0;
+      bot.lastDisconnectedAt = null;
       const me = sock.user?.id?.split(':')[0] || bot.phone;
       bot.number = me;
       _log(`✅ Connected: ${maskPhone(me)}`);
+      // Durable backup the moment pairing actually completes, not just on the debounce.
+      mongoSessionStore.saveNow(bot.phone, bot.sessionDir).catch(() => {});
     }
 
     // ── Disconnected ─────────────────────────────────────────────────────────
     if (connection === 'close') {
       bot.connected   = false;
       bot.socketReady = false;
+      bot.lastDisconnectedAt = Date.now();
 
       const statusCode = lastDisconnect?.error?.output?.statusCode;
       const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
@@ -323,14 +327,26 @@ async function _connectSocket(bot) {
       if (statusCode === DisconnectReason.loggedOut) {
         _log(`Session logged out: ${maskPhone(bot.phone)}`);
         clearSession(bot.sessionDir);
+        mongoSessionStore.remove(bot.phone).catch(() => {});
         bot.destroyed = true;
         _bots.delete(bot.phone);
         return;
       }
 
       if (shouldReconnect && !bot.destroyed) {
-        const delay = antiban.reconnectDelay(bot.attempt);
-        _log(`Reconnecting ${maskPhone(bot.phone)} in ${Math.round(delay/1000)}s (attempt ${bot.attempt})`);
+        let delay;
+        if (statusCode === DisconnectReason.restartRequired) {
+          // Expected mid-pairing close — WhatsApp intentionally closes the
+          // socket right after a pairing code is issued and expects an
+          // almost-immediate reconnect on the SAME auth state to finish the
+          // handshake. A slow backoff here is what let the pairing code
+          // expire before the phone ever completed linking.
+          delay = 350;
+          bot.attempt = 0; // don't let an expected restart inflate future backoff
+        } else {
+          delay = antiban.reconnectDelay(bot.attempt);
+        }
+        _log(`Reconnecting ${maskPhone(bot.phone)} in ${Math.round(delay / 1000)}s (attempt ${bot.attempt}, code ${statusCode})`);
         setTimeout(() => _connectSocket(bot), delay);
       }
     }
@@ -365,14 +381,42 @@ async function destroySession(phone) {
   bot.destroyed = true;
   try { bot.socket?.end(); } catch {}
   clearSession(bot.sessionDir);
+  mongoSessionStore.remove(phone).catch(() => {});
   _bots.delete(phone);
   _log(`Destroyed session: ${maskPhone(phone)}`);
   return true;
 }
 
+// ── Watchdog: auto-restart any bot that's been dead too long ────────────────
+// The close handler above already reconnects on every disconnect, but this
+// is a safety net in case that chain ever silently stops (e.g. an uncaught
+// synchronous throw). Runs continuously for the life of the process.
+const WATCHDOG_INTERVAL_MS = 2 * 60 * 1000; // check every 2 minutes
+const WATCHDOG_STALE_MS    = 5 * 60 * 1000; // force-reconnect if dead > 5 minutes
+let _watchdogStarted = false;
+
+function _startWatchdog() {
+  if (_watchdogStarted) return;
+  _watchdogStarted = true;
+  setInterval(() => {
+    const now = Date.now();
+    for (const bot of _bots.values()) {
+      if (bot.destroyed || bot.connected) continue;
+      if (!bot.lastDisconnectedAt) continue;
+      if (now - bot.lastDisconnectedAt > WATCHDOG_STALE_MS) {
+        _log(`⚠️  Watchdog: ${maskPhone(bot.phone)} has been offline for ${Math.round((now - bot.lastDisconnectedAt) / 60000)}m — forcing reconnect`);
+        bot.lastDisconnectedAt = now; // reset so we don't hammer it every tick
+        bot.attempt = 0;
+        _connectSocket(bot).catch((e) => _log('Watchdog reconnect failed:', e.message));
+      }
+    }
+  }, WATCHDOG_INTERVAL_MS);
+}
+
 // ── Public getters ───────────────────────────────────────────────────────────
 function getBot(phone)  { return _bots.get(phone) || null; }
 function getAllBots()    { return Array.from(_bots.values()); }
+function getMongoStatus() { return mongo.status(); }
 
 module.exports = {
   bootSavedSessions,
@@ -383,4 +427,5 @@ module.exports = {
   getBot,
   getAllBots,
   maskPhone,
+  getMongoStatus,
 };

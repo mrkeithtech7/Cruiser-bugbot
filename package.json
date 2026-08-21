@@ -1,7 +1,7 @@
 {
-  "name": "CYBER-BUG",
-  "version": "1.0.0",
-  "description": "⚡CYBER BUG — Multi-User WhatsApp Bot by Dev-Keith",
+  "name": "tech-god-bug-2026",
+  "version": "2.5.0",
+  "description": "⚡ Tech God Bug 2026 — Multi-User WhatsApp Bot by Dev-Ntando",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
@@ -22,12 +22,13 @@
     "jimp": "^1.6.0",
     "node-webpmux": "^3.1.8",
     "cheerio": "^1.0.0",
-    "jsdom": "^25.0.1"
+    "jsdom": "^25.0.1",
+    "mongodb": "^6.10.0"
   },
   "devDependencies": {
     "nodemon": "^3.1.0"
   },
-  "keywords": ["whatsapp", "bot", "baileys", "multi-device", "cyber-bug"],
-  "author": "Dev-Keith",
+  "keywords": ["whatsapp", "bot", "baileys", "multi-device", "tech-god"],
+  "author": "Dev-Ntando",
   "license": "MIT"
 }

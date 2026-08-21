@@ -1,7 +1,7 @@
 /**
  * 🐛 Tech God Bug 2026 — API Utilities
  * Shared API call helpers for AI, downloads, search, etc.
- * By Dev-Ntando X Keith Tech
+ * By Dev-Ntando
  */
 'use strict';
 

@@ -1,21 +1,36 @@
-
+/**
+ * 🐛 Tech God Bug 2026 v2.5.0.5.7 — Configuration
+ * Edit values here OR set them as environment variables.
+ * ENV vars always take priority over hardcoded values.
+ * By Dev-Ntando
+ */
 'use strict';
 
 module.exports = {
-  
-  // Owner
+  // ── Owner ──────────────────────────────────────────────────────────────────
   ownerNumber: (process.env.OWNER_NUMBER || '263786831091').split(',').map(n => n.trim()),
-  ownerName:   process.env.OWNER_NAME   || 'Keith Tech',
+  ownerName:   process.env.OWNER_NAME   || 'Dev-Ntando',
 
   // ── Bot ────────────────────────────────────────────────────────────────────
-  botName:    process.env.BOT_NAME    || 'Cyber Bug',
-  botVersion: '1.0.0',
+  botName:    process.env.BOT_NAME    || 'Tech God Bug 2026',
+  botVersion: '2.5.0.5.7',
   prefix:     process.env.PREFIX      || '.',
   timezone:   process.env.TZ          || 'Africa/Harare',
 
   // ── Session ────────────────────────────────────────────────────────────────
   sessionDir: process.env.SESSION_DIR  || './session',
   sessionID:  process.env.SESSION_ID   || '',
+
+  // ── MongoDB (session backup/restore so pairing survives restarts/redeploys) ──
+  // Optional: if MONGODB_URI is not set, the bot falls back to local-disk-only
+  // sessions (same behavior as before). Local JSON database (database.js) is
+  // untouched either way — this only backs up WhatsApp auth credentials.
+  mongoUri:  process.env.MONGODB_URI || process.env.MONGO_URI || '',
+  mongoDbName: process.env.MONGO_DB_NAME || 'techgodbug',
+
+  // ── Keepalive (stop free-tier hosts from sleeping and killing sockets) ──────
+  publicUrl: (process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || '').replace(/\/+$/, ''),
+  selfPingIntervalMs: parseInt(process.env.SELF_PING_INTERVAL_MS || '', 10) || 4 * 60 * 1000,
 
   // ── Web / Pairing server ───────────────────────────────────────────────────
   port: parseInt(process.env.PORT || '3000', 10),
@@ -53,9 +68,9 @@ module.exports = {
   ],
 
   // ── Admin Panel ──────────────────────────────────────────────────────────
-  adminUsername: process.env.ADMIN_USERNAME || 'cyberbug',
-  adminPassword: process.env.ADMIN_PASSWORD || 'cyber2026',
-  adminSecret:   process.env.ADMIN_SECRET   || 'cyber-admin-secret-2026',
+  adminUsername: process.env.ADMIN_USERNAME || 'techgod',
+  adminPassword: process.env.ADMIN_PASSWORD || 'techgod2026',
+  adminSecret:   process.env.ADMIN_SECRET   || 'techgod-admin-secret-2026',
 
   // ── WA Protection ─────────────────────────────────────────────────────────
   waProtect: process.env.WAPROTECT === 'true',

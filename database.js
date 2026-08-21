@@ -1,8 +1,8 @@
 /**
- *Cyber Bug 2026 v2.5.0.5.7 — Lightweight JSON Database
+ * 🐛 Tech God Bug 2026 v2.5.0.5.7 — Lightweight JSON Database
  * Flat-file storage with atomic writes.
  * Tracks: group settings, user data, premium users, daily limits, bug stats.
- * By Dev-Ntando x Keith Tech Database
+ * By Dev-Ntando
  */
 'use strict';
 
